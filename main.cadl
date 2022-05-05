@@ -1,0 +1,537 @@
+import "@cadl-lang/rest";
+import "@cadl-lang/openapi3";
+
+// How should this be namespaced?
+
+// Should serviceTitle/serviceVersion be moved to openapi3? Seems independent of REST.
+@serviceTitle("Form Recognizer")
+@serviceVersion("2022-01-30-preview")
+@route("/formrecognizer")
+namespace Azure.AI.FormRecognizer;
+
+using Cadl.Http;
+
+// Can I set a security definition for the Ocp-Apim-Subscription-Key header?
+
+// Add a formatter definition to the vscode plugin? :)
+
+model Error {
+  code: string;
+  message: string;
+  target?: string;
+  details?: Error[];
+  innererror?: Error;
+}
+
+model ResourceInfo {
+  customDocumentModels: CustomDocumentModelInfo;
+}
+
+model CustomDocumentModelInfo {
+  count: int32;
+  limit: int32;
+}
+
+// This doesn't appear anywhere in the swagger as "ApiVersion", and is inserted inline?
+enum ApiVersion {
+  Preview: "2022-01-30-preview",
+}
+
+model Page<T> {
+  value: T[];
+  // Any way to decorate with paging semantics in CADL? Any way to say this is a URL?
+  nextLink?: string;
+}
+
+model Request<T = {}> {
+  @query "api-version": string;
+  ...T;
+}
+
+model RequestBody<T> {
+  ...Request;
+  @body body: T;
+}
+
+// FR returns the _same_ error model for every 4xx/5xx status. Not obvious how
+// to model this.
+alias Response<T> = OkResponse<T> | ErrorResponse;
+
+model ErrorResponse {
+  // @statusCode code: ???
+  // how can I set a "default" OAPI value, or handle any non-success case?
+  @statusCode default: 400 | 403 | 404 | 429 | 500 | 502;
+  error: Error;
+}
+
+// Every operation in this service takes the api-version query param. Any way to set it on all methods in a namespace?
+@route("/info")
+@get
+op getInfo(...Request): Response<ResourceInfo>;
+
+model CopyAuthorizationRequest {
+  modelId: string;
+  description?: string;
+  tags?: Map<string, string>;
+}
+
+model CopyAuthorization {
+  targetResourceId: string;
+  targetResoruceRegion: string;
+  targetModelId: string;
+  targetModelLocation: string;
+  accessToken: string;
+  expirationDateTime: string;
+}
+
+@route("/documentModels:authorizeCopy")
+@post
+op getCopyAuthorization(
+  ...RequestBody<CopyAuthorizationRequest>
+): Response<CopyAuthorization>;
+
+model AzureBlobContentSource {
+  containerUrl: string;
+  prefix?: string;
+}
+
+model BuildModelRequest {
+  modelId: string;
+  description?: string;
+  buildMode: Models.BuildMode;
+  azureBlobSource?: AzureBlobContentSource;
+  tags?: Map<string, string>;
+}
+
+@route("/documentModels:build")
+@post
+op buildModel(
+  ...RequestBody<BuildModelRequest>
+): OperationLocation | ErrorResponse;
+
+model ComponentModelInfo {
+  modelId: string;
+}
+
+model ComposeModelRequest {
+  modelId: string;
+  description?: string;
+  componentModels: ComponentModelInfo[];
+  tags?: Map<string, string>;
+}
+
+@route("/documentModels:compose")
+@post
+op composeModel(
+  ...RequestBody<ComposeModelRequest>
+): OperationLocation | ErrorResponse;
+
+@route("/documentModels")
+namespace Models {
+  model ModelSummary {
+    modelId: string;
+    createdDateTime: zonedDateTime;
+    apiVersion?: string;
+    tags?: Map<string, string>;
+  }
+
+  model ModelInfo extends ModelSummary {
+    docTypes?: Map<string, DocTypeInfo>;
+  }
+
+  enum BuildMode {
+    template,
+    neural,
+  }
+
+  model DocTypeInfo {
+    // min/max-length on these fields?
+    description?: string;
+    buildMode?: BuildMode;
+    fieldSchema: Map<string, DocumentFieldSchema>;
+    // object?
+    fieldConfidence: null;
+  }
+
+  enum DocumentFieldType {
+    string,
+    date,
+    time,
+    phoneNumber,
+    number,
+    integer,
+    selectionMark,
+    countryRegion,
+    signature,
+    array,
+    object,
+    currency,
+  }
+
+  model DocumentFieldSchema {
+    // Any way to tag these? Items is present if type is "array". Properties if type is "object";
+    type: DocumentFieldType;
+    description?: string;
+    example?: string;
+    items?: DocumentFieldSchema;
+    properties?: Map<string, DocumentFieldSchema>;
+  }
+
+  @get op list(...Request): Response<Page<ModelSummary>>;
+
+  @route("/{modelId}")
+  namespace Model {
+    @get op get(@path modelId: string, ...Request): Response<ModelInfo>;
+
+    @delete op delete(@path modelId: string, ...Request): Response<{}>;
+  }
+
+  @route("/{modelId}:copyTo") @post op copyModelTo(
+    @path modelId: string,
+    @body authorization: CopyAuthorization,
+    @query "api-version": ApiVersion
+  ): OperationLocation | ErrorResponse;
+
+  enum StringIndexType {
+    textElements,
+    unicodeCodePoint,
+    utf16CodeUnit,
+  }
+
+  model AnalyzeRequestBinary {
+    @header contentType: "application/octet-stream";
+    @body body: bytes;
+  }
+
+  // :analyze can take either a JSON object with a URL in it or a binary post body. how to represent this?
+  @route("/{modelId}:analyze")
+  @post
+  op analyze(
+    @path modelId: string,
+    ...AnalyzeRequestBinary,
+    @query @pattern("^(\\d+(-\\d+)?)(,\\s*(\\d+(-\\d+)?))*$") pages?: string,
+    @query locale?: string,
+    @query stringIndexType?: StringIndexType,
+    ...Request
+  ): OperationLocation | ErrorResponse;
+
+  @route("/{modelId}/analyzeResults")
+  namespace AnalyzeResults {
+    enum AnalyzeOperationStatus {
+      notStarted,
+      running,
+      failed,
+      succeeded,
+    }
+
+    // Possible to model that analyzeResult is only present if status is succeeded?
+    model AnalyzeOperationState {
+      status: AnalyzeOperationStatus;
+      createdDateTime: zonedDateTime;
+      lastUpdatedDateTime: zonedDateTime;
+      error?: Error;
+      analyzeResult?: AnalyzeResult;
+    }
+
+    model AnalyzeResult {
+      apiVersion: string;
+      modelId: string;
+      stringIndexType: StringIndexType;
+      content: string;
+      pages: DocumentElements.Page[];
+      tables: DocumentElements.Table[];
+      keyValuePairs: DocumentElements.KeyValuePair[];
+      entities: DocumentElements.Entity[];
+      styles: DocumentElements.Style[];
+      languages: DocumentElements.Language[];
+      documents: DocumentElements.Document[];
+    }
+
+    @route("/{resultId}")
+    @get
+    op get(
+      @path modelId: string,
+      @path resultId: string,
+      @query "api-version": ApiVersion
+    ): Response<AnalyzeOperationState>;
+
+    namespace DocumentElements {
+      model Span {
+        offset: int32;
+        length: int32;
+      }
+
+      model DocumentElement {
+        span: Span;
+        boundingBox?: BoundingBox;
+        confidence: float64;
+      }
+
+      model Page {
+        pageNumber: int32;
+        angle: float64;
+        width: float64;
+        height: float64;
+        unit: "pixel" | "inch";
+        spans: Span[];
+        words: Word[];
+        selectionMarks?: SelectionMark[];
+        lines: Line[];
+      }
+
+      model Word {
+        content: string;
+        ...DocumentElement;
+      }
+
+      alias SelectionMarkState = "selected" | "unselected";
+
+      model SelectionMark {
+        state: SelectionMarkState;
+        ...DocumentElement;
+      }
+
+      model Line {
+        content: string;
+        boundingBox?: BoundingBox;
+        spans: Span[];
+      }
+
+      model Table {
+        rowCount: int32;
+        columnCount: int32;
+        cells: TableCell[];
+        boundingRegions?: BoundingRegion[];
+        spans: Span[];
+      }
+
+      enum TableCellKind {
+        content,
+        rowHeader,
+        columnHeader,
+        stubHead,
+        description,
+      }
+
+      model TableCell {
+        kind?: TableCellKind;
+        rowIndex: int32;
+        columnIndex: int32;
+        rowSpan?: int32;
+        columnSpan?: int32;
+        content: string;
+        boundingRegions?: BoundingRegion[];
+        spans: Span[];
+      }
+
+      model KeyValueElement {
+        content: string;
+        boundingRegions?: BoundingRegion[];
+        spans: Span[];
+      }
+
+      model KeyValuePair {
+        key: KeyValueElement;
+        value?: KeyValueElement;
+        confidence: float64;
+      }
+
+      model Entity {
+        category: string;
+        subCategory?: string;
+        content: string;
+        boundingRegions?: BoundingRegion[];
+        spans: Span[];
+        confidence: float64;
+      }
+
+      model Style {
+        isHandwritten?: boolean;
+        spans: Span[];
+        confidence: float64;
+      }
+
+      model Language {
+        // format ISO 639-1
+        languageCode: string;
+        spans: Span[];
+        confidence: float64;
+      }
+
+      model Document {
+        docType: string;
+        boundingRegions?: BoundingRegion[];
+        spans: Span[];
+        fields: Map<string, Field | ArrayField | ObjectField>;
+        confidence: float64;
+      }
+
+      // TODO: apply discriminated union capabilities when it's available
+      alias Field =
+        | StringField
+        | DateField
+        | TimeField
+        | PhoneNumberField
+        | IntegerField
+        | SelectionMarkField
+        | SignatureField
+        | CountryRegionField
+        | CurrencyField;
+
+      // Is it more natural to spread FieldCommon into all Fields or to say extends/is
+
+      model StringField {
+        type: "string";
+        valueString?: string;
+        ...FieldCommon;
+      }
+
+      model DateField {
+        type: "date";
+        valueDate?: plainDate;
+        ...FieldCommon;
+      }
+
+      model TimeField {
+        type: "time";
+        valueTime?: plainTime;
+        ...FieldCommon;
+      }
+
+      model PhoneNumberField {
+        type: "phoneNumber";
+        valuePhoneNumber?: string;
+        ...FieldCommon;
+      }
+
+      model NumberField {
+        type: "number";
+        valueNumber?: float64;
+        ...FieldCommon;
+      }
+
+      model IntegerField {
+        type: "integer";
+        valueInteger?: "int64";
+        ...FieldCommon;
+      }
+
+      model SelectionMarkField {
+        type: "selectionMark";
+        valueSelectionMark?: SelectionMarkState;
+        ...FieldCommon;
+      }
+
+      model CountryRegionField {
+        type: "countryRegion";
+        valueCountryRegion?: string;
+        ...FieldCommon;
+      }
+
+      model SignatureField {
+        type: "signature";
+        valueSignature?: "signed" | "unsigned";
+        ...FieldCommon;
+      }
+
+      model CurrencyValue {
+        amount: float64;
+        currencySymbol?: string;
+      }
+
+      model CurrencyField {
+        type: "currency";
+        valueCurrency?: CurrencyValue;
+        ...FieldCommon;
+      }
+
+      model ArrayField {
+        type: "array";
+        // Have to duplicate this union because something isn't quite right about cirularity checks
+        valueArray: (Field | ArrayField | ObjectField)[];
+        ...FieldCommon;
+      }
+
+      model ObjectField {
+        type: "object";
+        valueObject: Map<string, Field | ArrayField | ObjectField>;
+        ...FieldCommon;
+      }
+
+      model FieldCommon {
+        content: string;
+        boundingRegions?: BoundingRegion[];
+        spans: Span[];
+        confidence: float64;
+      }
+
+      // OAPIv3 no schema for Tuple, want to make this [8 x float64];
+      // TODO: service has recently changed this to "Polygon" allowing 3+ points
+      alias BoundingBox = float64[];
+
+      model BoundingRegion {
+        pageNumber: int32;
+        boundingBox: BoundingBox;
+      }
+    }
+  }
+}
+
+// Couldn't use `alias OperationLocation = AcceptedResponse<{ ... }>`
+model OperationLocation {
+  @statusCode accepted: 202;
+  // Location header isn't standard, so Location library type doesn't work.
+  @header("Operation-Location") operationLocation: string;
+}
+
+@route("/operations")
+namespace Operations {
+  enum OperationStatus {
+    notStarted,
+    running,
+    failed,
+    succeeded,
+    canceled,
+  }
+
+  enum OperationKind {
+    Build: "documentModelBuild",
+    Compose: "documentModelCompose",
+    CopyTo: "documentModelCopyTo",
+  }
+
+  model OperationInfo {
+    operationId: string;
+    status: OperationStatus;
+    percentCompleted?: int32;
+    // Have seen other langs use "naive" for date/time without zone info.
+    createdDateTime: zonedDateTime;
+    lastUpdatedDateTime: zonedDateTime;
+    kind: OperationKind;
+    resourceLocation: string;
+    apiVersion?: string;
+    tags?: Map<string, string>;
+  }
+
+  @get op getOperationsPage(...Request): Response<Page<OperationInfo>>;
+
+  model GetOperationResponse extends OperationInfo {
+    error?: Error;
+    // object?
+    result?: Models.ModelInfo;
+  }
+
+  @route("/{operationId}")
+  @get
+  op getOperation(
+    @path operationId: string,
+    ...Request
+  ): Response<GetOperationResponse>;
+}
+
+// TS generator questions
+// 1. apiVersion generated a weird mapper, with apiVersion constant set to document.version even though it is marked
+// required in the swagger and the apiVersion query param does not _appear_ to be related to the version. Is this a
+// name collision?
+// 2. Why are the methods nested inside of FormRecognizerImpl, .e.g `client.formReocgnizer.getInfo`?
+// 3. Can we generate a credential for a security definition?

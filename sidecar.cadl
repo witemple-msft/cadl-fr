@@ -1,0 +1,22 @@
+import "@cadl-lang/rest";
+
+using Cadl.Http;
+
+  enum StringIndexType {
+    textElements,
+    unicodeCodePoint,
+    utf16CodeUnit,
+  }
+
+alias AnalyzeRequest = {
+      urlSource: string;
+} | {
+      base64Source: string;
+  };
+
+  // :analyze can take either a JSON object with a URL in it or a binary post body. how to represent this?
+  @route("/analyze")
+  @post
+  op analyze(
+    @body body: AnalyzeRequest
+  ): {};
